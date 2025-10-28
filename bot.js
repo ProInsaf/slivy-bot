@@ -3,6 +3,7 @@ const mongoose = require('mongoose');
 const { v4: uuidv4 } = require('uuid');
 const dotenv = require('dotenv');
 const COOLDOWN_MINUTES = 5;
+const fiveMinutesAgo = new Date(Date.now() - COOLDOWN_MINUTES * 1 * 1000);
 
 dotenv.config();
 const bot = new Telegraf(process.env.BOT_TOKEN);
@@ -11,17 +12,7 @@ console.log('🚀 Запуск Telegram-бота...');
 
 // Подключение к MongoDB
 mongoose.connect(process.env.MONGODB_URI)
-  .then(async () => {
-    console.log('✅ MongoDB подключен!');
-    // Загрузка adminId при запуске
-    const adminUser = await User.findOne({ isAdmin: true });
-    if (adminUser) {
-      adminId = adminUser.userId;
-      console.log(`✅ Admin ID загружен: ${adminId}`);
-    } else {
-      console.warn('⚠️ Админ не найден в БД! Создайте пользователя с isAdmin: true.');
-    }
-  })
+  .then(() => console.log('✅ MongoDB подключен!'))
   .catch(err => {
     console.error('❌ Ошибка MongoDB:', err.message);
     process.exit(1);
@@ -160,27 +151,26 @@ bot.action(Object.keys(COURSES), async (ctx) => {
     return ctx.reply(`⚠️ Курс *${course.name}* уже куплен!\nПромокод: **${existingPromo.code}** (действует до ${existingPromo.expiresAt.toLocaleDateString('ru-RU')})\nАктивируй на сайте.`, { parse_mode: 'Markdown' });
   }
 
-  // Проверяем pending заявку с динамическим кулдауном
-  const fiveMinutesAgo = new Date(Date.now() - COOLDOWN_MINUTES * 60 * 1000);
-  const lastRequest = await PendingPayment.findOne({
-    userId,
-    lastRequestAt: { $gt: fiveMinutesAgo }
-  }).sort({ lastRequestAt: -1 });
+  // Проверяем pending заявку
+// ==== Проверка pending заявки ====
+const lastRequest = await PendingPayment.findOne({
+  userId,
+  lastRequestAt: { $gt: fiveMinutesAgo }
+}).sort({ lastRequestAt: -1 });
 
-  if (lastRequest) {
-    const timeLeftMs = COOLDOWN_MINUTES * 60 * 1000 - (Date.now() - lastRequest.lastRequestAt.getTime());
-    const minutesLeft = Math.ceil(timeLeftMs / 60000);
-    return ctx.reply(`⏳ Подождите ${minutesLeft} мин. перед новой заявкой.`);
-  }
+if (lastRequest) {
+  const minutesLeft = Math.ceil((COOLDOWN_MINUTES * 60 * 1000 - (Date.now() - lastRequest.lastRequestAt)) / 60000);
+  return ctx.reply(`⏳ Подождите ${minutesLeft} мин. перед новой заявкой.`);
+}
 
-  // Создаём новую заявку
-  const pending = new PendingPayment({ 
-    userId, 
-    username, 
-    courseKey,
-    lastRequestAt: new Date()  // Обновляем время
-  });
-  await pending.save();
+// ==== Создаём новую заявку ====
+const pending = new PendingPayment({ 
+  userId, 
+  username, 
+  courseKey,
+  lastRequestAt: new Date()  // ← Обновляем время
+});
+await pending.save();
 
   // Инфо об оплате
   const paymentDetails = PAYMENT_INFO.replace('{price}', course.price);
@@ -205,21 +195,16 @@ bot.on('photo', async (ctx) => {
     const pending = await PendingPayment.findById(pendingId);
     if (pending && pending.userId === userId && pending.status === 'pending' && !pending.photoFileId) {
       pending.photoFileId = ctx.message.photo[ctx.message.photo.length - 1].file_id;
-      const userCaption = ctx.message.caption || 'Без комментария'; // Захватываем текст от пользователя
       await pending.save();
       ctx.reply('✅ Скриншот получен. Ожидайте проверки от администратора.');
       if (adminId) {
         const course = COURSES[pending.courseKey];
-        const adminCaption = `Новая заявка на оплату:\nКурс: ${course.name}\nОт: @${pending.username} (ID: ${pending.userId})\nКомментарий пользователя: ${userCaption}`;
-        console.log(`Отправка уведомления админу: ${adminId}`); // Лог для отладки
-        await bot.telegram.sendPhoto(adminId, pending.photoFileId, {
-          caption: adminCaption,
+        bot.telegram.sendPhoto(adminId, pending.photoFileId, {
+          caption: `Новая заявка на оплату:\nКурс: ${course.name}\nОт: @${pending.username} (ID: ${pending.userId})`,
           reply_markup: Markup.inlineKeyboard([
             [Markup.button.callback('✅ Одобрить', `approve_${pending._id}`), Markup.button.callback('❌ Отклонить', `reject_${pending._id}`)]
-          ])
+          ]).reply_markup
         });
-      } else {
-        console.error('⚠️ Admin ID не установлен! Не удалось отправить уведомление.');
       }
       states.delete(userId);
     } else {
@@ -230,7 +215,7 @@ bot.on('photo', async (ctx) => {
   }
 });
 
-// Одобрение
+// ==== Одобрение ====
 bot.action(/approve_(.+)/, async (ctx) => {
   if (ctx.from.id.toString() !== adminId) return ctx.answerCbQuery('Доступ только админу.');
   const pendingId = ctx.match[1];
@@ -239,24 +224,17 @@ bot.action(/approve_(.+)/, async (ctx) => {
     return ctx.answerCbQuery('Заявка уже обработана или не найдена.');
   }
 
-  const course = COURSES[pending.courseKey]; // Определяем курс
   pending.status = 'approved';
   await pending.save();
 
-  // Генерация промокода
-  const code = uuidv4().substring(0, 8).toUpperCase(); // Пример генерации (используйте uuid)
-  const promo = new Promo({ 
-    code, 
-    userId: pending.userId, 
-    username: pending.username, 
-    course: course.name 
-  });
+  // Генерация промокода …
+  const promo = new Promo({ code, userId: pending.userId, username: pending.username, course: course.name });
   await promo.save();
 
-  // Уведомление пользователю
-  await bot.telegram.sendMessage(pending.userId, `✅ Заявка одобрена!\nКурс: ${course.name}\nПромокод: **${code}** (действует 30 дней).\nАктивируйте на сайте.`);
+  // Уведомление пользователю …
+  await bot.telegram.sendMessage(pending.userId, /* … */);
 
-  // Удаляем запись
+  // ← УДАЛЯЕМ запись
   await PendingPayment.deleteOne({ _id: pending._id });
 
   await ctx.answerCbQuery('Заявка одобрена.');
@@ -264,6 +242,7 @@ bot.action(/approve_(.+)/, async (ctx) => {
 });
 
 // Отклонение заявки
+// ==== Отклонение ====
 bot.action(/reject_(.+)/, async (ctx) => {
   if (ctx.from.id.toString() !== adminId) return ctx.answerCbQuery('Доступ только админу.');
   const pendingId = ctx.match[1];
@@ -272,13 +251,12 @@ bot.action(/reject_(.+)/, async (ctx) => {
     return ctx.answerCbQuery('Заявка уже обработана или не найдена.');
   }
 
-  const course = COURSES[pending.courseKey]; // Определяем курс
   pending.status = 'rejected';
   await pending.save();
 
-  await bot.telegram.sendMessage(pending.userId, `❌ Ваша заявка на курс "${course.name}" отклонена. Если это ошибка, свяжитесь с поддержкой.`);
+  await bot.telegram.sendMessage(pending.userId, '❌ Ваша заявка отклонена…');
 
-  // Удаляем запись
+  // ← УДАЛЯЕМ запись
   await PendingPayment.deleteOne({ _id: pending._id });
 
   await ctx.answerCbQuery('Заявка отклонена.');
