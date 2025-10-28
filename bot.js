@@ -149,14 +149,18 @@ bot.action(Object.keys(COURSES), async (ctx) => {
   }
 
   // Проверяем pending заявку
-  const existingPending = await PendingPayment.findOne({ userId, status: 'pending' });
-  if (existingPending) {
-    return ctx.reply('⚠️ У вас уже есть активная заявка на оплату. Ожидайте решения или свяжитесь с поддержкой.');
-  }
+// ==== Проверка pending заявки ====
+const existingPending = await PendingPayment.findOne({
+  userId,
+  status: { $in: ['pending', 'approved', 'rejected'] }
+});
+if (existingPending) {
+  return ctx.reply('⚠️ У вас уже есть заявка на оплату (ожидает решения или уже обработана).');
+}
 
-  // Создаём pending
-  const pending = new PendingPayment({ userId, username, courseKey });
-  await pending.save();
+// ==== Создаём новую заявку ====
+const pending = new PendingPayment({ userId, username, courseKey });
+await pending.save();
 
   // Инфо об оплате
   const paymentDetails = PAYMENT_INFO.replace('{price}', course.price);
@@ -201,60 +205,52 @@ bot.on('photo', async (ctx) => {
   }
 });
 
-// Одобрение заявки
+// ==== Одобрение ====
 bot.action(/approve_(.+)/, async (ctx) => {
   if (ctx.from.id.toString() !== adminId) return ctx.answerCbQuery('Доступ только админу.');
   const pendingId = ctx.match[1];
   const pending = await PendingPayment.findById(pendingId);
-  if (pending && pending.status === 'pending') {
-    pending.status = 'approved';
-    await pending.save();
-
-    // Генерация промокода
-    let code;
-    while (true) {
-      code = uuidv4().slice(0, 8).toUpperCase();
-      if (!(await Promo.findOne({ code }))) break;
-    }
-    const course = COURSES[pending.courseKey];
-    const promo = new Promo({ code, userId: pending.userId, username: pending.username, course: course.name });
-    await promo.save();
-    const expiresDate = promo.expiresAt.toLocaleDateString('ru-RU');
-
-    // Уведомление пользователю
-    await bot.telegram.sendMessage(pending.userId, 
-      `✅ Заявка одобрена!\n\n` +
-      `🎟️ Твой промокод для *${course.name}*: **${code}**\n` +
-      `⏰ Действует до: *${expiresDate}*\n\n` +
-      `👉 Введи на сайте [Сливы Умскул](https://slivy-umskul.vercel.app)\n` +
-      `Доступ только на одном ПК. После истечения — купи новый!`,
-      { parse_mode: 'Markdown' }
-    );
-
-    await ctx.answerCbQuery('Заявка одобрена.');
-    await ctx.editMessageCaption(`Заявка одобрена. Промокод выдан.`);
-  } else {
-    await ctx.answerCbQuery('Заявка уже обработана или не найдена.');
+  if (!pending || pending.status !== 'pending') {
+    return ctx.answerCbQuery('Заявка уже обработана или не найдена.');
   }
+
+  pending.status = 'approved';
+  await pending.save();
+
+  // Генерация промокода …
+  const promo = new Promo({ code, userId: pending.userId, username: pending.username, course: course.name });
+  await promo.save();
+
+  // Уведомление пользователю …
+  await bot.telegram.sendMessage(pending.userId, /* … */);
+
+  // ← УДАЛЯЕМ запись
+  await PendingPayment.deleteOne({ _id: pending._id });
+
+  await ctx.answerCbQuery('Заявка одобрена.');
+  await ctx.editMessageCaption(`Заявка одобрена. Промокод выдан.`);
 });
 
 // Отклонение заявки
+// ==== Отклонение ====
 bot.action(/reject_(.+)/, async (ctx) => {
   if (ctx.from.id.toString() !== adminId) return ctx.answerCbQuery('Доступ только админу.');
   const pendingId = ctx.match[1];
   const pending = await PendingPayment.findById(pendingId);
-  if (pending && pending.status === 'pending') {
-    pending.status = 'rejected';
-    await pending.save();
-
-    // Уведомление пользователю
-    await bot.telegram.sendMessage(pending.userId, '❌ Ваша заявка на оплату отклонена. Проверьте данные или свяжитесь с поддержкой для уточнения.');
-
-    await ctx.answerCbQuery('Заявка отклонена.');
-    await ctx.editMessageCaption(`Заявка отклонена.`);
-  } else {
-    await ctx.answerCbQuery('Заявка уже обработана или не найдена.');
+  if (!pending || pending.status !== 'pending') {
+    return ctx.answerCbQuery('Заявка уже обработана или не найдена.');
   }
+
+  pending.status = 'rejected';
+  await pending.save();
+
+  await bot.telegram.sendMessage(pending.userId, '❌ Ваша заявка отклонена…');
+
+  // ← УДАЛЯЕМ запись
+  await PendingPayment.deleteOne({ _id: pending._id });
+
+  await ctx.answerCbQuery('Заявка отклонена.');
+  await ctx.editMessageCaption(`Заявка отклонена.`);
 });
 
 // Админ панель
