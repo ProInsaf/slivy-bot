@@ -2,6 +2,8 @@ const { Telegraf, Markup } = require('telegraf');
 const mongoose = require('mongoose');
 const { v4: uuidv4 } = require('uuid');
 const dotenv = require('dotenv');
+const COOLDOWN_MINUTES = 5;
+const fiveMinutesAgo = new Date(Date.now() - COOLDOWN_MINUTES * 60 * 1000);
 
 dotenv.config();
 const bot = new Telegraf(process.env.BOT_TOKEN);
@@ -31,7 +33,8 @@ const pendingPaymentSchema = new mongoose.Schema({
   courseKey: String,
   photoFileId: String,
   status: { type: String, default: 'pending' }, // pending, approved, rejected
-  createdAt: { type: Date, default: Date.now }
+  createdAt: { type: Date, default: Date.now },
+  lastRequestAt: { type: Date, default: Date.now } // ← НОВОЕ ПОЛЕ
 });
 const PendingPayment = mongoose.model('PendingPayment', pendingPaymentSchema);
 
@@ -150,16 +153,23 @@ bot.action(Object.keys(COURSES), async (ctx) => {
 
   // Проверяем pending заявку
 // ==== Проверка pending заявки ====
-const existingPending = await PendingPayment.findOne({
+const lastRequest = await PendingPayment.findOne({
   userId,
-  status: { $in: ['pending', 'approved', 'rejected'] }
-});
-if (existingPending) {
-  return ctx.reply('⚠️ У вас уже есть заявка на оплату (ожидает решения или уже обработана).');
+  lastRequestAt: { $gt: fiveMinutesAgo }
+}).sort({ lastRequestAt: -1 });
+
+if (lastRequest) {
+  const minutesLeft = Math.ceil((COOLDOWN_MINUTES * 60 * 1000 - (Date.now() - lastRequest.lastRequestAt)) / 60000);
+  return ctx.reply(`⏳ Подождите ${minutesLeft} мин. перед новой заявкой.`);
 }
 
 // ==== Создаём новую заявку ====
-const pending = new PendingPayment({ userId, username, courseKey });
+const pending = new PendingPayment({ 
+  userId, 
+  username, 
+  courseKey,
+  lastRequestAt: new Date()  // ← Обновляем время
+});
 await pending.save();
 
   // Инфо об оплате
