@@ -1,6 +1,5 @@
 const { Telegraf, Markup } = require('telegraf');
 const mongoose = require('mongoose');
-const { v4: uuidv4 } = require('uuid');
 const dotenv = require('dotenv');
 const COOLDOWN_MINUTES = 5;
 const fiveMinutesAgo = new Date(Date.now() - COOLDOWN_MINUTES * 60 * 1000);
@@ -132,6 +131,7 @@ bot.start(async (ctx) => {
     [Markup.button.callback('📐 Математика - 499 руб', 'course_math')],
     [Markup.button.callback('🧠 Личностный трек - 199 руб', 'course_soft')],
     [Markup.button.callback('🎯 Полный пакет - 1499 руб', 'course_full')],
+    [Markup.button.url('🆓 Пробный урок - Бесплатно', 'https://t.me/+Uy7g3lEu5D44ZGNi')],
     [Markup.button.callback('📞 Поддержка', 'support')]
   ];
   if (adminId === ctx.from.id.toString()) {
@@ -329,7 +329,16 @@ bot.action('exit_support', async (ctx) => {
   ctx.reply('Вы вышли из поддержки. Используйте /start для меню.');
 });
 
-// Обработка текстовых сообщений (для рассылки и поддержки)
+// Кнопка "Ответить" для админа
+bot.action(/reply_to_(.+)/, async (ctx) => {
+  if (ctx.from.id.toString() !== adminId) return ctx.answerCbQuery('Доступ только админу.');
+  const targetUserId = ctx.match[1];
+  await ctx.answerCbQuery('Введите ответ пользователю:');
+  states.set(adminId, `replying_to_${targetUserId}`);
+  await ctx.editMessageReplyMarkup({ reply_markup: { inline_keyboard: [] } }); // Убрать кнопку после нажатия
+});
+
+// Обработка текстовых сообщений (для рассылки, поддержки и ответов админа)
 bot.on('text', async (ctx) => {
   const userId = ctx.from.id.toString();
   const state = states.get(userId);
@@ -350,11 +359,24 @@ bot.on('text', async (ctx) => {
   } else if (state === 'support_mode') {
     const text = ctx.message.text;
     if (adminId) {
-      await bot.telegram.sendMessage(adminId, `📩 Сообщение в поддержку от @${ctx.from.username || 'аноним'} (ID: ${userId}):\n\n${text}`);
+      await bot.telegram.sendMessage(adminId, `📩 Сообщение в поддержку от @${ctx.from.username || 'аноним'} (ID: ${userId}):\n\n${text}`, 
+        Markup.inlineKeyboard([
+          [Markup.button.callback('📝 Ответить', `reply_to_${userId}`)]
+        ])
+      );
     }
     ctx.reply('✅ Сообщение отправлено. Напишите следующее или выйдите.', 
       Markup.inlineKeyboard([[Markup.button.callback('❌ Выйти', 'exit_support')]])
     );
+  } else if (state && state.startsWith('replying_to_') && userId === adminId) {
+    const targetUserId = state.split('_')[2];
+    try {
+      await bot.telegram.sendMessage(targetUserId, `Ответ от поддержки:\n\n${ctx.message.text}`);
+      ctx.reply('✅ Ответ отправлен пользователю.');
+    } catch (err) {
+      ctx.reply('❌ Ошибка отправки ответа. Пользователь мог заблокировать бота.');
+    }
+    states.delete(adminId);
   } else {
     // Игнор или подсказка
     ctx.reply('Используйте /start для меню или выберите действие.');
