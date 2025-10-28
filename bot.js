@@ -3,7 +3,7 @@ const mongoose = require('mongoose');
 const { v4: uuidv4 } = require('uuid');
 const dotenv = require('dotenv');
 const COOLDOWN_MINUTES = 5;
-const fiveMinutesAgo = new Date(Date.now() - COOLDOWN_MINUTES * 1 * 1000);
+const fiveMinutesAgo = new Date(Date.now() - COOLDOWN_MINUTES * 60 * 1000);
 
 dotenv.config();
 const bot = new Telegraf(process.env.BOT_TOKEN);
@@ -92,6 +92,9 @@ const PAYMENT_INFO = 'Переведите {price} руб на карту Тин
 const states = new Map();
 let adminId = null;
 
+// Сайт для активации промокода (замените на реальный URL)
+const ACTIVATION_SITE = 'https://umskul.ru/activate'; // Placeholder; замените на актуальную ссылку
+
 // Регистрация пользователя
 async function registerUser(ctx) {
   const userId = ctx.from.id.toString();
@@ -148,7 +151,7 @@ bot.action(Object.keys(COURSES), async (ctx) => {
     expiresAt: { $gt: new Date() } 
   });
   if (existingPromo) {
-    return ctx.reply(`⚠️ Курс *${course.name}* уже куплен!\nПромокод: **${existingPromo.code}** (действует до ${existingPromo.expiresAt.toLocaleDateString('ru-RU')})\nАктивируй на сайте.`, { parse_mode: 'Markdown' });
+    return ctx.reply(`⚠️ Курс *${course.name}* уже куплен!\nПромокод: **${existingPromo.code}** (действует до ${existingPromo.expiresAt.toLocaleDateString('ru-RU')})\nАктивируй на сайте: ${ACTIVATION_SITE}.`, { parse_mode: 'Markdown' });
   }
 
   // Проверяем pending заявку
@@ -227,12 +230,17 @@ bot.action(/approve_(.+)/, async (ctx) => {
   pending.status = 'approved';
   await pending.save();
 
-  // Генерация промокода …
+  // Генерация промокода
+  const course = COURSES[pending.courseKey];
+  const code = uuidv4();
   const promo = new Promo({ code, userId: pending.userId, username: pending.username, course: course.name });
   await promo.save();
 
-  // Уведомление пользователю …
-  await bot.telegram.sendMessage(pending.userId, /* … */);
+  // Уведомление пользователю
+  await bot.telegram.sendMessage(pending.userId, 
+    `✅ Ваша заявка одобрена!\nКурс: *${course.name}*\nПромокод: **${code}**\nДействует до: ${promo.expiresAt.toLocaleDateString('ru-RU')}\nАктивируйте на сайте: ${ACTIVATION_SITE}.`,
+    { parse_mode: 'Markdown' }
+  );
 
   // ← УДАЛЯЕМ запись
   await PendingPayment.deleteOne({ _id: pending._id });
@@ -254,7 +262,7 @@ bot.action(/reject_(.+)/, async (ctx) => {
   pending.status = 'rejected';
   await pending.save();
 
-  await bot.telegram.sendMessage(pending.userId, '❌ Ваша заявка отклонена…');
+  await bot.telegram.sendMessage(pending.userId, '❌ Ваша заявка отклонена. Пожалуйста, проверьте детали оплаты и попробуйте снова, или свяжитесь с поддержкой.');
 
   // ← УДАЛЯЕМ запись
   await PendingPayment.deleteOne({ _id: pending._id });
