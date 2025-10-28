@@ -26,6 +26,16 @@ const userSchema = new mongoose.Schema({
 });
 const User = mongoose.model('User', userSchema);
 
+// Генератор промокода (8 uppercase алфанумерических символов)
+function generatePromoCode() {
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+  let code = '';
+  for (let i = 0; i < 8; i++) {
+    code += chars[Math.floor(Math.random() * chars.length)];
+  }
+  return code;
+}
+
 // Схема pending оплат
 const pendingPaymentSchema = new mongoose.Schema({
   userId: String,
@@ -93,7 +103,7 @@ const states = new Map();
 let adminId = null;
 
 // Сайт для активации промокода (замените на реальный URL)
-const ACTIVATION_SITE = 'https://umskul.ru/activate'; // Placeholder; замените на актуальную ссылку
+const ACTIVATION_SITE = 'https://slivy-umskul.vercel.app/'; // Placeholder; замените на актуальную ссылку
 
 // Регистрация пользователя
 async function registerUser(ctx) {
@@ -162,8 +172,14 @@ const lastRequest = await PendingPayment.findOne({
 }).sort({ lastRequestAt: -1 });
 
 if (lastRequest) {
-  const minutesLeft = Math.ceil((COOLDOWN_MINUTES * 60 * 1000 - (Date.now() - lastRequest.lastRequestAt)) / 60000);
-  return ctx.reply(`⏳ Подождите ${minutesLeft} мин. перед новой заявкой.`);
+  const timePassed = Date.now() - lastRequest.lastRequestAt.getTime();
+  const cooldownMs = COOLDOWN_MINUTES * 60 * 1000;
+  const minutesLeft = Math.max(0, Math.ceil((cooldownMs - timePassed) / 60000));  // ← Math.max(0, ...) — фикс отрицательных
+  
+  if (minutesLeft > 0) {
+    return ctx.reply(`⏳ Подождите ${minutesLeft} мин. перед новой заявкой.`);
+  }
+  // Если 0 или меньше — пропускаем, создаём новую
 }
 
 // ==== Создаём новую заявку ====
@@ -219,6 +235,7 @@ bot.on('photo', async (ctx) => {
 });
 
 // ==== Одобрение ====
+// ==== Одобрение ====
 bot.action(/approve_(.+)/, async (ctx) => {
   if (ctx.from.id.toString() !== adminId) return ctx.answerCbQuery('Доступ только админу.');
   const pendingId = ctx.match[1];
@@ -231,9 +248,18 @@ bot.action(/approve_(.+)/, async (ctx) => {
   await pending.save();
 
   // Генерация промокода
+  let code;
+  do {
+    code = generatePromoCode();
+  } while (await Promo.findOne({ code }));  // Уникальный код
+
   const course = COURSES[pending.courseKey];
-  const code = uuidv4();
-  const promo = new Promo({ code, userId: pending.userId, username: pending.username, course: course.name });
+  const promo = new Promo({ 
+    code, 
+    userId: pending.userId, 
+    username: pending.username, 
+    course: course.name 
+  });
   await promo.save();
 
   // Уведомление пользователю
@@ -242,7 +268,7 @@ bot.action(/approve_(.+)/, async (ctx) => {
     { parse_mode: 'Markdown' }
   );
 
-  // ← УДАЛЯЕМ запись
+  // УДАЛЯЕМ запись
   await PendingPayment.deleteOne({ _id: pending._id });
 
   await ctx.answerCbQuery('Заявка одобрена.');
